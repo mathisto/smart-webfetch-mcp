@@ -16,7 +16,7 @@ Standard web fetch tools dump entire pages into the context window, often:
 
 ## The Solution
 
-Smart WebFetch provides 5 tools for intelligent web fetching:
+Smart WebFetch provides 7 tools for intelligent web fetching:
 
 | Tool | Purpose |
 |------|---------|
@@ -25,6 +25,8 @@ Smart WebFetch provides 5 tools for intelligent web fetching:
 | `web_fetch_code` | Extract only code blocks |
 | `web_fetch_section` | Fetch specific heading/section |
 | `web_fetch_chunked` | Paginated fetching for large docs |
+| `web_fetch_links` | Extract all links from a page |
+| `web_fetch_tables` | Extract tables as markdown |
 
 ## Installation
 
@@ -37,6 +39,12 @@ uvx smart-webfetch-mcp
 ```
 
 ## Configuration
+
+### Claude Code
+
+```bash
+claude mcp add --transport stdio smart-webfetch -- uvx smart-webfetch-mcp
+```
 
 ### OpenCode
 
@@ -171,6 +179,27 @@ Fetch large documents in chunks.
 - `chunk_size` (optional, default 4000): Tokens per chunk
 
 **Returns:** Chunk content with navigation metadata
+
+### web_fetch_links
+
+Extract all links from a page.
+
+**Parameters:**
+- `url` (required): URL to extract links from
+- `filter_pattern` (optional): Regex to filter link URLs
+- `external_only` (optional, default false): Only return external links
+
+**Returns:** Markdown list of links with text and URL
+
+### web_fetch_tables
+
+Extract tables from a page as markdown.
+
+**Parameters:**
+- `url` (required): URL to extract tables from
+- `table_index` (optional): Specific table index (0-based), returns all if not specified
+
+**Returns:** Markdown formatted tables
 
 ## Development
 

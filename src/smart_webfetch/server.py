@@ -35,6 +35,13 @@ def _get_extractor() -> ContentExtractor:
     return _extractor
 
 
+def _validate_timeout(timeout: float | None) -> float | None:
+    """Validate and clamp timeout value to allowed range (1-120 seconds)."""
+    if timeout is None:
+        return None
+    return max(1.0, min(120.0, float(timeout)))
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List all available tools for smart web fetching."""
@@ -50,6 +57,12 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "URL to check"},
+                    "timeout": {
+                        "type": "number",
+                        "description": "Request timeout in seconds (default 30, max 120)",
+                        "default": 30,
+                        "maximum": 120,
+                    },
                 },
                 "required": ["url"],
             },
@@ -75,6 +88,12 @@ async def list_tools() -> list[Tool]:
                         "description": "How to handle large content",
                         "default": "auto",
                     },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Request timeout in seconds (default 30, max 120)",
+                        "default": 30,
+                        "maximum": 120,
+                    },
                 },
                 "required": ["url"],
             },
@@ -89,6 +108,12 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "URL to extract code from"},
+                    "timeout": {
+                        "type": "number",
+                        "description": "Request timeout in seconds (default 30, max 120)",
+                        "default": 30,
+                        "maximum": 120,
+                    },
                 },
                 "required": ["url"],
             },
@@ -106,6 +131,12 @@ async def list_tools() -> list[Tool]:
                     "heading": {
                         "type": "string",
                         "description": "Heading text to find (e.g., 'Installation')",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Request timeout in seconds (default 30, max 120)",
+                        "default": 30,
+                        "maximum": 120,
                     },
                 },
                 "required": ["url", "heading"],
@@ -130,6 +161,65 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Tokens per chunk",
                         "default": 4000,
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Request timeout in seconds (default 30, max 120)",
+                        "default": 30,
+                        "maximum": 120,
+                    },
+                },
+                "required": ["url"],
+            },
+        ),
+        Tool(
+            name="web_fetch_links",
+            description=(
+                "Extract all links from a page. Returns a markdown list of links with text "
+                "and URL. Optionally filter by pattern or external links only."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to extract links from"},
+                    "filter_pattern": {
+                        "type": "string",
+                        "description": "Regex pattern to filter link URLs (e.g., '/docs/')",
+                    },
+                    "external_only": {
+                        "type": "boolean",
+                        "description": "Only return external links",
+                        "default": False,
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Request timeout in seconds (default 30, max 120)",
+                        "default": 30,
+                        "maximum": 120,
+                    },
+                },
+                "required": ["url"],
+            },
+        ),
+        Tool(
+            name="web_fetch_tables",
+            description=(
+                "Extract tables from a page and return as markdown tables. "
+                "Handles thead/tbody, th/td cells, colspan, and captions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to extract tables from"},
+                    "table_index": {
+                        "type": "integer",
+                        "description": "Specific table index to return (0-based). Returns all tables if not specified.",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Request timeout in seconds (default 30, max 120)",
+                        "default": 30,
+                        "maximum": 120,
                     },
                 },
                 "required": ["url"],
@@ -163,6 +253,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return await handle_fetch_section(arguments)
         elif name == "web_fetch_chunked":
             return await handle_fetch_chunked(arguments)
+        elif name == "web_fetch_links":
+            return await handle_fetch_links(arguments)
+        elif name == "web_fetch_tables":
+            return await handle_fetch_tables(arguments)
         else:
             return [
                 TextContent(
@@ -192,8 +286,10 @@ async def handle_preflight(arguments: dict[str, Any]) -> list[TextContent]:
             )
         ]
 
+    timeout = _validate_timeout(arguments.get("timeout"))
+
     try:
-        result = await fetcher.prefetch(url)
+        result = await fetcher.prefetch(url, timeout=timeout)
     except FetchError as e:
         return [
             TextContent(
@@ -268,10 +364,13 @@ async def handle_smart_fetch(arguments: dict[str, Any]) -> list[TextContent]:
 
     max_tokens = arguments.get("max_tokens", 8000)
     strategy = arguments.get("strategy", "auto")
+    timeout = _validate_timeout(arguments.get("timeout"))
 
     try:
         # Use smart_fetch which handles truncation internally
-        result = await fetcher.smart_fetch(url, max_tokens=max_tokens, strategy=strategy)
+        result = await fetcher.smart_fetch(
+            url, max_tokens=max_tokens, strategy=strategy, timeout=timeout
+        )
     except FetchError as e:
         return [
             TextContent(
@@ -319,9 +418,11 @@ async def handle_fetch_code(arguments: dict[str, Any]) -> list[TextContent]:
             )
         ]
 
+    timeout = _validate_timeout(arguments.get("timeout"))
+
     try:
         # Fetch the page (no truncation needed, we'll extract just code)
-        html_content, content_type = await fetcher.fetch_raw(url)
+        html_content, content_type = await fetcher.fetch_raw(url, timeout=timeout)
     except FetchError as e:
         return [
             TextContent(
@@ -386,8 +487,10 @@ async def handle_fetch_section(arguments: dict[str, Any]) -> list[TextContent]:
             )
         ]
 
+    timeout = _validate_timeout(arguments.get("timeout"))
+
     try:
-        html_content, content_type = await fetcher.fetch_raw(url)
+        html_content, content_type = await fetcher.fetch_raw(url, timeout=timeout)
     except FetchError as e:
         return [
             TextContent(
@@ -465,8 +568,10 @@ async def handle_fetch_chunked(arguments: dict[str, Any]) -> list[TextContent]:
             )
         ]
 
+    timeout = _validate_timeout(arguments.get("timeout"))
+
     try:
-        html_content, content_type = await fetcher.fetch_raw(url)
+        html_content, content_type = await fetcher.fetch_raw(url, timeout=timeout)
     except FetchError as e:
         return [
             TextContent(
@@ -529,6 +634,153 @@ async def handle_fetch_chunked(arguments: dict[str, Any]) -> list[TextContent]:
         output += f"Call with chunk={chunk_index + 1} for next chunk.*"
     else:
         output += "This is the last chunk.*"
+
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_fetch_links(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle web_fetch_links tool - extract links from a page."""
+    fetcher = _get_fetcher()
+    extractor = _get_extractor()
+
+    url = arguments.get("url")
+    if not url:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": "Missing required parameter: url"}, indent=2),
+            )
+        ]
+
+    filter_pattern = arguments.get("filter_pattern")
+    external_only = arguments.get("external_only", False)
+    timeout = _validate_timeout(arguments.get("timeout"))
+
+    try:
+        html_content, content_type = await fetcher.fetch_raw(url, timeout=timeout)
+    except FetchError as e:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {"error": str(e), "url": url, "status_code": e.status_code}, indent=2
+                ),
+            )
+        ]
+
+    # Extract links
+    links = extractor.extract_links(
+        html_content,
+        base_url=url,
+        filter_pattern=filter_pattern,
+        external_only=external_only,
+    )
+
+    if not links:
+        msg = "# No Links Found\n\n"
+        msg += f"**Source:** {url}\n\n"
+        if filter_pattern:
+            msg += f"**Filter:** `{filter_pattern}`\n"
+        if external_only:
+            msg += "**External only:** Yes\n"
+        msg += "\nNo matching links were found on this page."
+        return [TextContent(type="text", text=msg)]
+
+    # Format output as markdown list
+    output = "# Links\n\n"
+    output += f"**Source:** {url}\n"
+    output += f"**Found:** {len(links)} link(s)\n"
+    if filter_pattern:
+        output += f"**Filter:** `{filter_pattern}`\n"
+    if external_only:
+        output += "**External only:** Yes\n"
+    output += "\n---\n\n"
+
+    for link in links:
+        external_marker = " (external)" if link.is_external else ""
+        output += f"- [{link.text}]({link.url}){external_marker}\n"
+
+    total_tokens = fetcher.count_tokens(output)
+    output = f"<!-- Total tokens: {total_tokens:,} -->\n\n" + output
+
+    return [TextContent(type="text", text=output)]
+
+
+async def handle_fetch_tables(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle web_fetch_tables tool - extract tables from a page."""
+    fetcher = _get_fetcher()
+    extractor = _get_extractor()
+
+    url = arguments.get("url")
+    if not url:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": "Missing required parameter: url"}, indent=2),
+            )
+        ]
+
+    table_index = arguments.get("table_index")
+    timeout = _validate_timeout(arguments.get("timeout"))
+
+    try:
+        html_content, content_type = await fetcher.fetch_raw(url, timeout=timeout)
+    except FetchError as e:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {"error": str(e), "url": url, "status_code": e.status_code}, indent=2
+                ),
+            )
+        ]
+
+    # Extract tables
+    tables = extractor.extract_tables(html_content)
+
+    if not tables:
+        return [
+            TextContent(
+                type="text",
+                text=f"# No Tables Found\n\n**Source:** {url}\n\n"
+                "No tables were detected on this page.",
+            )
+        ]
+
+    # If specific table index requested
+    if table_index is not None:
+        if table_index < 0 or table_index >= len(tables):
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "error": f"Table index {table_index} out of range",
+                            "total_tables": len(tables),
+                            "valid_range": f"0-{len(tables) - 1}",
+                        },
+                        indent=2,
+                    ),
+                )
+            ]
+        tables = [tables[table_index]]
+
+    # Format output
+    output = "# Tables\n\n"
+    output += f"**Source:** {url}\n"
+    output += f"**Found:** {len(tables)} table(s)"
+    if table_index is not None:
+        output += f" (showing table {table_index})"
+    output += "\n\n---\n\n"
+
+    for i, table in enumerate(tables):
+        if len(tables) > 1:
+            output += f"## Table {i + 1}\n\n"
+        output += extractor.table_to_markdown(table)
+        output += "\n\n"
+
+    total_tokens = fetcher.count_tokens(output)
+    output = f"<!-- Total tokens: {total_tokens:,} -->\n\n" + output
 
     return [TextContent(type="text", text=output)]
 

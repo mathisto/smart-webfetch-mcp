@@ -36,6 +36,24 @@ class Chunk:
     token_count: int
 
 
+@dataclass
+class Table:
+    """Represents an extracted HTML table."""
+
+    headers: list[str]
+    rows: list[list[str]]
+    caption: str | None
+
+
+@dataclass
+class Link:
+    """Represents an extracted link from a page."""
+
+    url: str
+    text: str
+    is_external: bool
+
+
 class ContentExtractor:
     """Extract and process content from HTML documents."""
 
@@ -314,6 +332,80 @@ class ContentExtractor:
 
         return sections
 
+    def extract_links(
+        self,
+        html: str,
+        base_url: str,
+        filter_pattern: str | None = None,
+        external_only: bool = False,
+    ) -> list[Link]:
+        """Extract links from HTML content.
+
+        Args:
+            html: HTML content to parse
+            base_url: Base URL for resolving relative links and determining externality
+            filter_pattern: Optional regex pattern to filter link URLs
+            external_only: If True, only return external links
+
+        Returns:
+            List of Link instances, deduplicated by URL
+        """
+        from urllib.parse import urljoin, urlparse
+
+        soup = BeautifulSoup(html, "lxml")
+        base_domain = urlparse(base_url).netloc.lower()
+
+        # Patterns to filter out
+        skip_prefixes = ("javascript:", "mailto:", "tel:", "#", "data:")
+
+        seen_urls: set[str] = set()
+        links: list[Link] = []
+
+        # Compile filter pattern if provided
+        filter_re = re.compile(filter_pattern) if filter_pattern else None
+
+        for anchor in soup.find_all("a", href=True):
+            href = anchor.get("href", "")
+            if not href or not isinstance(href, str):
+                continue
+
+            # Skip filtered schemes
+            href_lower = href.lower().strip()
+            if any(href_lower.startswith(prefix) for prefix in skip_prefixes):
+                continue
+
+            # Resolve relative URLs
+            absolute_url = urljoin(base_url, href)
+
+            # Skip duplicates
+            if absolute_url in seen_urls:
+                continue
+            seen_urls.add(absolute_url)
+
+            # Determine if external
+            link_domain = urlparse(absolute_url).netloc.lower()
+            is_external = link_domain != base_domain
+
+            # Apply external_only filter
+            if external_only and not is_external:
+                continue
+
+            # Apply pattern filter
+            if filter_re and not filter_re.search(absolute_url):
+                continue
+
+            # Extract link text
+            text = anchor.get_text(strip=True)
+            if not text:
+                # Use title attribute or URL as fallback
+                text = anchor.get("title", "") or absolute_url
+                if isinstance(text, list):
+                    text = text[0] if text else absolute_url
+
+            links.append(Link(url=absolute_url, text=str(text), is_external=is_external))
+
+        return links
+
     def chunk_content(
         self, content: str, chunk_size: int = 4000, overlap: int = 200
     ) -> list[Chunk]:
@@ -515,6 +607,140 @@ class ContentExtractor:
             content=content,
             token_count=self.count_tokens(content),
         )
+
+    def extract_tables(self, html: str) -> list[Table]:
+        """Extract all tables from HTML and convert to structured data.
+
+        Handles:
+        - thead/tbody structure
+        - th/td cells
+        - colspan (simplified: repeats cell content)
+        - Optional caption element
+
+        Args:
+            html: HTML content to parse
+
+        Returns:
+            List of Table instances with headers, rows, and optional caption
+        """
+        soup = BeautifulSoup(html, "lxml")
+        tables: list[Table] = []
+
+        for table_elem in soup.find_all("table"):
+            caption = None
+            caption_elem = table_elem.find("caption")
+            if caption_elem:
+                caption = caption_elem.get_text(strip=True)
+
+            headers: list[str] = []
+            rows: list[list[str]] = []
+
+            # Try to find headers in thead first
+            thead = table_elem.find("thead")
+            if thead:
+                header_row = thead.find("tr")
+                if header_row:
+                    headers = self._extract_table_row_cells(header_row, is_header=True)
+
+            # Process all rows (tbody or direct tr children)
+            tbody = table_elem.find("tbody")
+            row_container = tbody if tbody else table_elem
+
+            for tr in row_container.find_all("tr", recursive=False):
+                # If we don't have headers yet, check if first row has th cells
+                if not headers:
+                    th_cells = tr.find_all("th")
+                    if th_cells:
+                        headers = self._extract_table_row_cells(tr, is_header=True)
+                        continue
+
+                row_cells = self._extract_table_row_cells(tr, is_header=False)
+                if row_cells:
+                    rows.append(row_cells)
+
+            # Only include tables that have some content
+            if headers or rows:
+                # If no headers found, use empty strings matching first row length
+                if not headers and rows:
+                    headers = [""] * len(rows[0])
+                tables.append(Table(headers=headers, rows=rows, caption=caption))
+
+        return tables
+
+    def _extract_table_row_cells(self, tr: Tag, is_header: bool) -> list[str]:
+        """Extract cell contents from a table row.
+
+        Args:
+            tr: Table row element
+            is_header: If True, look for th cells; otherwise td cells
+
+        Returns:
+            List of cell text contents, with colspan cells repeated
+        """
+        cells: list[str] = []
+        cell_tags = tr.find_all("th" if is_header else "td")
+
+        # If looking for td but found none, also try th (some tables use th in body)
+        if not cell_tags and not is_header:
+            cell_tags = tr.find_all("th")
+
+        for cell in cell_tags:
+            text = cell.get_text(strip=True)
+            # Handle colspan (simplified: repeat cell content)
+            colspan = 1
+            colspan_attr = cell.get("colspan")
+            if colspan_attr:
+                try:
+                    colspan = int(str(colspan_attr))
+                except (ValueError, TypeError):
+                    colspan = 1
+            cells.extend([text] * colspan)
+
+        return cells
+
+    def table_to_markdown(self, table: Table) -> str:
+        """Convert a Table to markdown format.
+
+        Args:
+            table: Table instance to convert
+
+        Returns:
+            Markdown table string
+        """
+        lines: list[str] = []
+
+        if table.caption:
+            lines.append(f"**{table.caption}**\n")
+
+        if not table.headers and not table.rows:
+            return ""
+
+        # Determine column count
+        col_count = len(table.headers) if table.headers else len(table.rows[0])
+
+        # Normalize headers
+        headers = table.headers if table.headers else [""] * col_count
+
+        # Escape pipe characters in cells
+        def escape_cell(text: str) -> str:
+            return text.replace("|", "\\|")
+
+        # Header row
+        header_line = "| " + " | ".join(escape_cell(h) for h in headers) + " |"
+        lines.append(header_line)
+
+        # Separator row
+        separator = "| " + " | ".join("---" for _ in headers) + " |"
+        lines.append(separator)
+
+        # Data rows
+        for row in table.rows:
+            # Pad row to match header length if needed
+            padded_row = row + [""] * (len(headers) - len(row))
+            row_line = "| " + " | ".join(escape_cell(c) for c in padded_row[: len(headers)]) + " |"
+            lines.append(row_line)
+
+        return "\n".join(lines)
 
     def html_to_markdown(self, html: str) -> str:
         """Convert HTML to clean markdown.

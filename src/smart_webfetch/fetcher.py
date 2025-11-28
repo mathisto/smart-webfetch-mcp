@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import httpx
 import tiktoken
+
+
+# Type alias for cache entries: (content, content_type, timestamp)
+CacheEntry = tuple[str, str, float]
 
 
 @dataclass
@@ -79,7 +86,7 @@ class SmartFetcher:
 
     # Default headers
     DEFAULT_HEADERS = {
-        "User-Agent": "SmartWebFetch-MCP/0.1 (+https://github.com/mathisto/smart-webfetch-mcp)",
+        "User-Agent": "SmartWebFetch-MCP/0.2 (+https://github.com/mathisto/smart-webfetch-mcp)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
     }
@@ -89,6 +96,8 @@ class SmartFetcher:
         default_max_tokens: int = 8000,
         timeout: float = 30.0,
         follow_redirects: bool = True,
+        cache_ttl: float = 300.0,
+        min_request_interval: float = 0.5,
     ):
         """
         Initialize the smart fetcher.
@@ -97,12 +106,19 @@ class SmartFetcher:
             default_max_tokens: Default token limit for fetched content.
             timeout: Request timeout in seconds.
             follow_redirects: Whether to follow HTTP redirects.
+            cache_ttl: Time-to-live for cached responses in seconds (default: 300).
+            min_request_interval: Minimum time between requests to the same domain
+                in seconds (default: 0.5).
         """
         self.default_max_tokens = default_max_tokens
         self._client: httpx.AsyncClient | None = None
         self._timeout = timeout
         self._follow_redirects = follow_redirects
         self._encoder: tiktoken.Encoding | None = None
+        self._cache: dict[str, CacheEntry] = {}
+        self._cache_ttl = cache_ttl
+        self._min_request_interval = min_request_interval
+        self._last_request_time: dict[str, float] = {}
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -121,6 +137,37 @@ class SmartFetcher:
         if self._encoder is None:
             self._encoder = tiktoken.get_encoding("cl100k_base")
         return self._encoder
+
+    def _get_domain(self, url: str) -> str:
+        """
+        Extract domain from URL for rate limiting.
+
+        Args:
+            url: URL to extract domain from.
+
+        Returns:
+            Domain string (e.g., 'example.com').
+        """
+        parsed = urlparse(url)
+        return parsed.netloc.lower()
+
+    async def _wait_for_rate_limit(self, url: str) -> None:
+        """
+        Wait if necessary to respect rate limits for a domain.
+
+        Args:
+            url: URL about to be requested.
+        """
+        domain = self._get_domain(url)
+        now = time.monotonic()
+
+        if domain in self._last_request_time:
+            elapsed = now - self._last_request_time[domain]
+            if elapsed < self._min_request_interval:
+                wait_time = self._min_request_interval - elapsed
+                await asyncio.sleep(wait_time)
+
+        self._last_request_time[domain] = time.monotonic()
 
     def count_tokens(self, text: str) -> int:
         """
@@ -184,15 +231,17 @@ class SmartFetcher:
             return title[:200]  # Limit title length
         return None
 
-    async def prefetch(self, url: str) -> PrefetchResult:
+    async def prefetch(self, url: str, timeout: float | None = None) -> PrefetchResult:
         """
         Get metadata about a URL without fetching full content.
 
-        Performs a HEAD request first, then a partial GET if needed
+        If content is already cached, builds result from cached data.
+        Otherwise performs a HEAD request first, then a partial GET if needed
         to extract title and estimate size.
 
         Args:
             url: URL to prefetch.
+            timeout: Request timeout in seconds (overrides default if provided).
 
         Returns:
             PrefetchResult with URL metadata.
@@ -200,9 +249,29 @@ class SmartFetcher:
         Raises:
             FetchError: If the request fails.
         """
+        # If we already have cached content, use it to build prefetch result
+        cached = self._get_cached(url)
+        if cached is not None:
+            content, content_type = cached
+            is_html = self._is_html_content_type(content_type)
+            title = self._extract_title(content) if is_html else None
+            token_count = self.count_tokens(content)
+            return PrefetchResult(
+                url=url,
+                status_code=200,  # Cached content was from successful fetch
+                content_type=content_type,
+                content_length=len(content.encode("utf-8")),
+                estimated_tokens=token_count,
+                is_html=is_html,
+                title=title,
+            )
+
         try:
+            # Respect rate limits
+            await self._wait_for_rate_limit(url)
+
             # Try HEAD request first
-            head_response = await self.client.head(url)
+            head_response = await self.client.head(url, timeout=timeout or self._timeout)
             head_response.raise_for_status()
 
             content_type = head_response.headers.get("content-type", "")
@@ -259,6 +328,7 @@ class SmartFetcher:
     async def _fetch_title_partial(self, url: str) -> str | None:
         """Fetch just enough content to extract title."""
         try:
+            await self._wait_for_rate_limit(url)
             async with self.client.stream("GET", url) as response:
                 chunks = []
                 async for chunk in response.aiter_bytes():
@@ -278,6 +348,7 @@ class SmartFetcher:
         Returns:
             Tuple of (partial_content, content_type).
         """
+        await self._wait_for_rate_limit(url)
         async with self.client.stream("GET", url) as response:
             response.raise_for_status()
             content_type = response.headers.get("content-type")
@@ -291,12 +362,51 @@ class SmartFetcher:
             content = b"".join(chunks).decode("utf-8", errors="replace")
             return content, content_type
 
-    async def fetch_raw(self, url: str) -> tuple[str, str]:
+    def _get_cached(self, url: str) -> tuple[str, str] | None:
+        """
+        Get cached content if available and not expired.
+
+        Args:
+            url: URL to look up in cache.
+
+        Returns:
+            Tuple of (content, content_type) if cached and valid, None otherwise.
+        """
+        if url not in self._cache:
+            return None
+
+        content, content_type, timestamp = self._cache[url]
+        if time.time() - timestamp > self._cache_ttl:
+            # Expired entry, remove it
+            del self._cache[url]
+            return None
+
+        return content, content_type
+
+    def _set_cached(self, url: str, content: str, content_type: str) -> None:
+        """
+        Store content in cache with current timestamp.
+
+        Args:
+            url: URL key for the cache entry.
+            content: Fetched content to cache.
+            content_type: Content-Type header value.
+        """
+        self._cache[url] = (content, content_type, time.time())
+
+    def clear_cache(self) -> None:
+        """Clear all cached entries."""
+        self._cache.clear()
+
+    async def fetch_raw(self, url: str, timeout: float | None = None) -> tuple[str, str]:
         """
         Fetch raw content from URL.
 
+        Returns cached content if available and not expired.
+
         Args:
             url: URL to fetch.
+            timeout: Request timeout in seconds (overrides default if provided).
 
         Returns:
             Tuple of (content, content_type).
@@ -304,12 +414,21 @@ class SmartFetcher:
         Raises:
             FetchError: If the request fails.
         """
+        # Check cache first
+        cached = self._get_cached(url)
+        if cached is not None:
+            return cached
+
         try:
-            response = await self.client.get(url)
+            await self._wait_for_rate_limit(url)
+            response = await self.client.get(url, timeout=timeout or self._timeout)
             response.raise_for_status()
 
             content_type = response.headers.get("content-type", "text/plain")
             content = response.text
+
+            # Cache successful fetches
+            self._set_cached(url, content, content_type)
 
             return content, content_type
 
@@ -431,6 +550,7 @@ class SmartFetcher:
         url: str,
         max_tokens: int | None = None,
         strategy: str = "auto",
+        timeout: float | None = None,
     ) -> FetchResult:
         """
         Fetch URL with automatic handling of large content.
@@ -445,6 +565,7 @@ class SmartFetcher:
                 - 'auto': Find natural break points for truncation.
                 - 'truncate': Hard cut at token limit.
                 - 'summarize': Reserved for future LLM summarization.
+            timeout: Request timeout in seconds (overrides default if provided).
 
         Returns:
             FetchResult with content and metadata.
@@ -463,10 +584,10 @@ class SmartFetcher:
         effective_max = max_tokens or self.default_max_tokens
 
         # Step 1: Prefetch to check size
-        prefetch_result = await self.prefetch(url)
+        prefetch_result = await self.prefetch(url, timeout=timeout)
 
         # Step 2: Fetch full content
-        content, content_type = await self.fetch_raw(prefetch_result.url)
+        content, content_type = await self.fetch_raw(prefetch_result.url, timeout=timeout)
         original_tokens = self.count_tokens(content)
 
         # Step 3: Check if truncation needed

@@ -1,5 +1,10 @@
 # Smart WebFetch MCP Server
 
+[![PyPI version](https://img.shields.io/pypi/v/smart-webfetch-mcp)](https://pypi.org/project/smart-webfetch-mcp/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/smart-webfetch-mcp)](https://pypi.org/project/smart-webfetch-mcp/)
+[![Python version](https://img.shields.io/pypi/pyversions/smart-webfetch-mcp)](https://pypi.org/project/smart-webfetch-mcp/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Context-aware web fetching for LLMs. Prevents context window flooding by checking page size before fetching and providing surgical extraction tools.
 
 ## The Problem

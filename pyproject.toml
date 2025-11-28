@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smart-webfetch-mcp"
+version = "0.1.0"
+description = "Context-aware web fetching MCP server that respects token limits"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Matt Kelly" }
+]
+keywords = ["mcp", "web", "fetch", "llm", "context", "tokens"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.25.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "markdownify>=0.11.0",
+    "tiktoken>=0.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-httpx>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+smart-webfetch-mcp = "smart_webfetch.server:main"
+
+[project.urls]
+Homepage = "https://github.com/mathisto/smart-webfetch-mcp"
+Repository = "https://github.com/mathisto/smart-webfetch-mcp"
+Issues = "https://github.com/mathisto/smart-webfetch-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/smart_webfetch"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
